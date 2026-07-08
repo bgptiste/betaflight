@@ -22,6 +22,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <stdio.h> // debugging only
 
 #include "platform.h"
 
@@ -48,6 +49,10 @@
 
 #include "io/gps.h"
 #include "io/gps_virtual.h"
+
+#ifdef USE_GPS_SEPTENTRIO
+#include "io/gps_septentrio.h"
+#endif
 
 #if ENABLE_DRONECAN
 #include "io/dronecan/dronecan_gnss.h"
@@ -93,9 +98,12 @@ GPS_svinfo_t GPS_svinfo[GPS_SV_MAXSATS_M8N];
 // Time allowed for module to respond to baud rate change during initial configuration
 #define GPS_CONFIG_BAUD_CHANGE_INTERVAL 330  // Time to wait, in ms, between 'test this baud rate' messages
 #define GPS_CONFIG_CHANGE_INTERVAL 110       // Time to wait, in ms, between CONFIG steps
-#define GPS_BAUDRATE_TEST_COUNT 3      // Number of times to repeat the test message when setting baudrate
-#define GPS_RECV_TIME_MAX 25           // Max permitted time, in us, for the NMEA Receive Data process
-#define GPS_UBLOX_RECV_TIME_MAX 15     // Max permitted time, in us, for the UBLOX Receive Data process
+#define GPS_BAUDRATE_TEST_COUNT 3       // Number of times to repeat the test message when setting baudrate
+#define GPS_RECV_TIME_MAX 25            // Max permitted time, in us, for the NMEA Receive Data process
+#define GPS_UBLOX_RECV_TIME_MAX 15      // Max permitted time, in us, for the UBLOX Receive Data process
+
+#define GPS_SEPTENTRIO_RECV_TIME_MAX 15 // TO BE DETERMINED 
+
 #define GPS_FRAME_PROCESS_TIME_US 10    // Estimated ceiling for time required to process a frame, in us, for the Receive Data process
 // Decay the estimated max task duration by 1/(1 << GPS_TASK_DECAY_SHIFT) on every invocation
 #define GPS_TASK_DECAY_SHIFT 9         // Smoothing factor for GPS task re-scheduler
@@ -399,6 +407,8 @@ static void gpsSetState(gpsState_e state)
 
 void gpsInit(void)
 {
+    fprintf(stderr, "[GPS] GPS init\n"); // debugging only
+
     gpsDataIntervalSeconds = 0.1f;
     gpsData.userBaudRateIndex = 0;
     gpsData.timeouts = 0;
@@ -414,8 +424,12 @@ void gpsInit(void)
     memset(dashboardGpsPacketLog, 0x00, sizeof(dashboardGpsPacketLog));
 #endif
 
+    fprintf(stderr, "[GPS] GPS unknown state\n"); // debugging only
+
     // init gpsData structure. if we're not actually enabled, don't bother doing anything else
     gpsSetState(GPS_STATE_UNKNOWN);
+
+    fprintf(stderr, "[GPS] GPS provider: %d\n", gpsConfig()->provider); // debugging only
 
     // MSP / virtual / DroneCAN providers don't own a serial port — the
     // frame source is another subsystem feeding gpsSol through updateXxxGPS().
@@ -428,6 +442,8 @@ void gpsInit(void)
     if (!gpsPortConfig) {
         return;
     }
+
+    fprintf(stderr, "[GPS] GPS port config: identifier=%d, baudrateIndex=%d, provider=%d\n", gpsPortConfig->identifier, gpsPortConfig->gps_baudrateIndex, gpsConfig()->provider); // debugging only
 
     // set the user's intended baud rate
     initBaudRateIndex = BAUD_COUNT;
@@ -999,6 +1015,41 @@ static void gpsConfigureNmea(void)
 }
 #endif // USE_GPS_NMEA
 
+#ifdef USE_GPS_SEPTENTRIO
+
+static void gpsConfigureSeptentrio(void)
+{
+    // Keep Septentrio on the same state-machine shape as the other GPS drivers so auto-config can be added later easily
+
+    // Wait until GPS transmit buffer is empty
+    if (!isSerialTransmitBufferEmpty(gpsPort)) {
+        return;
+    }
+
+    switch (gpsData.state) {
+    case GPS_STATE_DETECT_BAUD:
+        // TODO: add baud rate detection for Septentrio receivers
+        gpsSetState(GPS_STATE_CHANGE_BAUD); // Switch to the next state for now, assuming the baud rate is correct
+        break;
+
+    case GPS_STATE_CHANGE_BAUD:
+        // TODO: add baud rate change 
+        gpsSetState(GPS_STATE_CONFIGURE);
+        break;
+
+    case GPS_STATE_CONFIGURE:
+        gpsSeptentrioReset(); // reset the receiver to ensure it is in a known state before starting to receive data
+        // TODO: add receiver configuration commands 
+        gpsSetState(GPS_STATE_RECEIVING_DATA);
+        break;
+
+    default:
+        break;
+    }
+}
+
+#endif // USE_GPS_SEPTENTRIO
+
 #ifdef USE_GPS_UBLOX
 
 static void gpsConfigureUblox(void)
@@ -1285,6 +1336,13 @@ static void gpsConfigureHardware(void)
         gpsConfigureUblox();
 #endif
         break;
+
+    case GPS_SEPTENTRIO:
+#ifdef USE_GPS_SEPTENTRIO
+        gpsConfigureSeptentrio();
+#endif
+        break;
+
     default:
         break;
     }
@@ -1481,6 +1539,37 @@ void gpsUpdate(timeUs_t currentTimeUs)
     }
 #endif
 
+#ifdef USE_GPS_SEPTENTRIO
+    case GPS_SEPTENTRIO:
+    {
+        if (!gpsPort) {
+            break;
+        }
+        rxBytesWaiting = serialRxBytesWaiting(gpsPort);
+        // fprintf(stderr, "[GPS] RX bytes waiting: %d\n", rxBytesWaiting); // debugging only
+        DEBUG_SET(DEBUG_GPS_CONNECTION, 7, rxBytesWaiting);
+        static uint8_t wait = 0;
+        static bool isFast = false;
+        while (rxBytesWaiting-- > 0) {
+            wait = 0;
+            if (!isFast) {
+                rescheduleTask(TASK_SELF, TASK_PERIOD_HZ(TASK_GPS_RATE_FAST));
+                isFast = true;
+            }
+            if (cmpTimeUs(micros(), currentTimeUs) > GPS_SEPTENTRIO_RECV_TIME_MAX) {
+                fprintf(stderr, "[GPS] Max receive time exceeded\n"); // debugging only
+                break;
+            }
+            if (gpsNewFrameSeptentrio(serialRead(gpsPort))) {
+                fprintf(stderr, "[GPS] New Septentrio frame complete!\n\n");
+                gpsHandleFrameComplete();
+            }
+        }
+        rescheduleWhenNecessary(&wait, &isFast);
+        break;
+    }
+#endif
+
     case GPS_MSP:
         if (GPS_update & GPS_MSP_UPDATE) { // GPS data received via MSP
             if (gpsData.state == GPS_STATE_INITIALIZED) {
@@ -1552,6 +1641,7 @@ void gpsUpdate(timeUs_t currentTimeUs)
         // check for no data/gps timeout/cable disconnection etc
         if (cmp32(gpsData.now, gpsData.lastNavMessage) > GPS_TIMEOUT_MS) {
             gpsSetState(GPS_STATE_LOST_COMMUNICATION);
+            fprintf(stderr, "[GPS] No data\n"); // debugging only
         }
         break;
     }
@@ -1641,6 +1731,11 @@ bool gpsNewFrame(uint8_t c)
     case GPS_UBLOX:         // UBX binary
 #ifdef USE_GPS_UBLOX
         return gpsNewFrameUBLOX(c);
+#endif
+        break;
+    case GPS_SEPTENTRIO:    // SBF binary
+#ifdef USE_GPS_SEPTENTRIO
+        return gpsNewFrameSeptentrio(c);
 #endif
         break;
     default:

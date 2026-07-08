@@ -177,6 +177,7 @@ typedef enum {
 typedef enum {
     GPS_NMEA = 0,
     GPS_UBLOX,
+    GPS_SEPTENTRIO,
     GPS_MSP,
     GPS_VIRTUAL,
     GPS_DRONECAN,

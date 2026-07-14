@@ -89,7 +89,7 @@ gpsSolutionData_t gpsSol;
 uint8_t GPS_update = 0;             // toogle to distinct a GPS position update (directly or via MSP)
 
 uint8_t GPS_numCh;                              // Details on numCh/svinfo in gps.h
-GPS_svinfo_t GPS_svinfo[GPS_SV_MAXSATS_M8N];
+GPS_svinfo_t GPS_svinfo[GPS_SV_MAXSATS]; 
 
 // GPS LOST_COMMUNICATION timeout in ms (max time between received nav solutions)
 #define GPS_TIMEOUT_MS 2500
@@ -442,8 +442,6 @@ void gpsInit(void)
     if (!gpsPortConfig) {
         return;
     }
-
-    fprintf(stderr, "[GPS] GPS port config: identifier=%d, baudrateIndex=%d, provider=%d\n", gpsPortConfig->identifier, gpsPortConfig->gps_baudrateIndex, gpsConfig()->provider); // debugging only
 
     // set the user's intended baud rate
     initBaudRateIndex = BAUD_COUNT;
@@ -1546,7 +1544,6 @@ void gpsUpdate(timeUs_t currentTimeUs)
             break;
         }
         rxBytesWaiting = serialRxBytesWaiting(gpsPort);
-        // fprintf(stderr, "[GPS] RX bytes waiting: %d\n", rxBytesWaiting); // debugging only
         DEBUG_SET(DEBUG_GPS_CONNECTION, 7, rxBytesWaiting);
         static uint8_t wait = 0;
         static bool isFast = false;
@@ -1557,7 +1554,6 @@ void gpsUpdate(timeUs_t currentTimeUs)
                 isFast = true;
             }
             if (cmpTimeUs(micros(), currentTimeUs) > GPS_SEPTENTRIO_RECV_TIME_MAX) {
-                fprintf(stderr, "[GPS] Max receive time exceeded\n"); // debugging only
                 break;
             }
             if (gpsNewFrameSeptentrio(serialRead(gpsPort))) {

@@ -30,102 +30,6 @@
 #include "io/gps.h"
 #include "io/gps_septentrio.h"
 
-typedef struct __attribute__((packed)) {
-	uint8_t sync1;
-	uint8_t sync2;
-	uint16_t crc;
-	uint16_t id_word; // 13 bits of block ID, 3 bits of version
-	uint16_t length;
-	// Receiver time stamp
-	uint32_t tow; // Time of Week (ms)
-	uint16_t wnc; // Week Number Count (mod 1024)
-} sbfHeader_t;
-
-typedef struct __attribute__((packed)) {
-	uint8_t nr_sv;
-	uint8_t reserved;
-	uint16_t p_dop;
-	uint16_t t_dop;
-	uint16_t h_dop;
-	uint16_t v_dop;
-	float hpl;
-	float vpl;
-} sbfDop_t;
-
-typedef struct __attribute__((packed)) {
-	uint8_t mode; 
-	uint8_t error;
-	double latitude; 
-	double longitude;
-	double height;
-	float undulation;
-	float vn;
-	float ve;
-	float vu;
-	float cog;
-	double rx_clk_bias;
-	float rx_clk_drift;
-	uint8_t time_system;
-	uint8_t datum;
-	uint8_t nr_sv;
-	uint8_t wa_corr_info;
-	uint16_t reference_id;
-	uint16_t mean_corr_age;
-	uint32_t signal_info;
-	uint8_t alert_flag;
-	uint8_t nr_bases;
-	uint16_t ppp_info;
-	uint16_t latency;
-	uint16_t h_accuracy;
-	uint16_t v_accuracy;
-} sbfPvtGeodetic_t;
-
-typedef struct __attribute__((packed)) {
-	uint8_t mode;
-	uint8_t error;
-	float cov_vn_vn;
-	float cov_ve_ve;
-	float cov_vu_vu;
-	float cov_dt_dt;
-	float cov_vn_ve;
-	float cov_vn_vu;
-	float cov_vn_dt;
-	float cov_ve_vu;
-	float cov_ve_dt;
-	float cov_vu_dt;
-} sbfVelCovGeodetic_t;
-
-enum {
-	SBF_SYNC1 = '$', // 0x24
-	SBF_SYNC2 = '@', // 0x40
-	SBF_HEADER_SIZE = 14,
-	SBF_MAX_FRAME_SIZE = 300, // based on PX4 autopilot's SBF parser (k_max_message_size), maybe to be increased 
-}; // Septentrio Binary Format (SBF) parser constants
-
-enum {
-	SBF_BLOCK_DOP = 4001,
-	SBF_BLOCK_PVTGEODETIC = 4007,
-	SBF_BLOCK_VELCOVGEODETIC = 5908,
-	SBF_BLOCK_ENDOFPVT = 5921, // end of transmission of all PVT related blocks belonging to the same epoch
-}; // SBF block IDs
-
-typedef struct {
-	uint8_t frame[SBF_MAX_FRAME_SIZE];
-	uint16_t index; // current index into frame buffer
-	uint16_t expectedLength;
-	uint32_t currentTow;
-	uint16_t currentWnc;
-	uint64_t lastNavEpochMs; // timestamp of the last committed epoch in milliseconds since GPS epoch
-	bool synced; 			 // true when the sync sequence has been detected and we are accumulating bytes into the frame buffer
-	bool havePvt;
-	bool haveDop;
-	bool haveVelCov;
-	sbfHeader_t header;
-	sbfPvtGeodetic_t pvt;
-	sbfDop_t dop;
-	sbfVelCovGeodetic_t velCov;
-} sbfParserState_t; // SBF parser state 
-
 static sbfParserState_t sbfState;
 
 static uint16_t sbfBlockId(const sbfHeader_t *header)
@@ -133,18 +37,71 @@ static uint16_t sbfBlockId(const sbfHeader_t *header)
 	return (uint16_t)(header->id_word & 0x1FFF);
 }
 
-static uint16_t sbfCrc16(const uint8_t *data, uint16_t length)
-{
-	uint8_t x;
-	uint16_t crc = 0;
-	// Calculate CRC16 over the data, starting after the sync bytes 
-	while (length--) {
-		x = (uint8_t)((crc >> 8) ^ *data++);
-		x ^= x >> 4;
-		crc = (uint16_t)((crc << 8) ^ ((uint16_t)x << 12) ^ ((uint16_t)x << 5) ^ x);
-	}
+// Before: CRC calculation was performed over the entire frame once the expected length was reached.
+// Now: CRC calculation is performed incrementally as each byte is received,
+// allowing early detection of corrupted frames and avoiding the need to store the entire frame before validation.
 
-	return crc;
+// This also allows handling frames exceeding SBF_MAX_FRAME_SIZE. Until this limit is reached
+// (or for smaller frames), the payload is stored in the frame buffer while the CRC is computed progressively. 
+// If the frame exceeds SBF_MAX_FRAME_SIZE, additional payload bytes are no longer stored, 
+// but the CRC calculation continues until the expected frame length is reached.
+
+// Without this change, handling frames larger than SBF_MAX_FRAME_SIZE would require skipping
+// CRC validation to store the truncated payload, which could lead to accepting corrupted frames.
+
+// static uint16_t sbfCrc16(const uint8_t *data, uint16_t length)
+// {
+// 	uint8_t x;
+// 	uint16_t crc = 0;
+// 	// Calculate CRC16 over the data, starting after the sync bytes 
+// 	while (length--) {
+// 		x = (uint8_t)((crc >> 8) ^ *data++);
+// 		x ^= x >> 4;
+// 		crc = (uint16_t)((crc << 8) ^ ((uint16_t)x << 12) ^ ((uint16_t)x << 5) ^ x);
+// 	}
+// 	return crc;
+// }
+
+static uint16_t sbfAccumulateCrc16(uint16_t crc, uint8_t data)
+{
+    uint8_t x = (uint8_t)((crc >> 8) ^ data);
+    x ^= x >> 4;
+    return (uint16_t)((crc << 8) ^ ((uint16_t)x << 12) ^ ((uint16_t)x << 5) ^ x);
+}
+
+static uint8_t sbfSvidToGnssId(uint16_t svid) {  
+    if (svid >= 1   && svid <= 37)  return SEPTENTRIO_GNSS_GPS; 
+    if (svid >= 38  && svid <= 61)  return SEPTENTRIO_GNSS_GLONASS;  
+    if (svid == 62)                 return SEPTENTRIO_GNSS_GLONASS; // GLONASS unknown slot
+    if (svid >= 63  && svid <= 68)  return SEPTENTRIO_GNSS_GLONASS;  
+    if (svid >= 71  && svid <= 106) return SEPTENTRIO_GNSS_GALILEO; 
+    // 107-119: L-Band MSS, no standard GNSS ID, skip
+    if (svid >= 120 && svid <= 140) return SEPTENTRIO_GNSS_SBAS; 
+    if (svid >= 141 && svid <= 180) return SEPTENTRIO_GNSS_BEIDOU;
+    if (svid >= 181 && svid <= 190) return SEPTENTRIO_GNSS_QZSS; 
+    if (svid >= 191 && svid <= 197) return SEPTENTRIO_GNSS_NAVIC; 
+    if (svid >= 198 && svid <= 215) return SEPTENTRIO_GNSS_SBAS;  
+    if (svid >= 216 && svid <= 222) return SEPTENTRIO_GNSS_NAVIC;
+    if (svid >= 223 && svid <= 245) return SEPTENTRIO_GNSS_BEIDOU;
+    if (svid >= 250 && svid <= 251) return SEPTENTRIO_GNSS_GPS;  
+    return SEPTENTRIO_GNSS_UNKNOWN; // unknown, same sentinel as unused slot 
+}
+
+static uint8_t sbfSvidToSatId(uint16_t svid) {
+    if (svid >= 1   && svid <= 37)  return svid;       // GPS G01-G37
+    if (svid >= 38  && svid <= 61)  return svid - 37;  // GLONASS R01-R24
+    if (svid == 62)                 return 0;          // GLONASS unknown slot
+    if (svid >= 63  && svid <= 68)  return svid - 38;  // GLONASS R25-R30
+    if (svid >= 71  && svid <= 106) return svid - 70;  // Galileo E01-E36
+    if (svid >= 120 && svid <= 140) return svid - 100; // SBAS S20-S40
+    if (svid >= 141 && svid <= 180) return svid - 140; // BeiDou C01-C40
+    if (svid >= 181 && svid <= 190) return svid - 180; // QZSS J01-J10
+    if (svid >= 191 && svid <= 197) return svid - 190; // NavIC I01-I07
+    if (svid >= 198 && svid <= 215) return svid - 157; // SBAS S41-S58
+    if (svid >= 216 && svid <= 222) return svid - 208; // NavIC I08-I14
+    if (svid >= 223 && svid <= 245) return svid - 182; // BeiDou C41-C63
+    if (svid >= 250 && svid <= 251) return svid - 212; // GPS G38-G39
+    return (uint8_t)svid;
 }
 
 static void sbfResetFrame(void)
@@ -152,6 +109,7 @@ static void sbfResetFrame(void)
 	sbfState.index = 0;
 	sbfState.expectedLength = 0;
 	sbfState.synced = false;
+	sbfState.calculatedCrc = 0;
 	memset(sbfState.frame, 0, sizeof(sbfState.frame));
 }
 
@@ -162,9 +120,11 @@ static void sbfResetEpoch(void)
 	sbfState.havePvt = false;
 	sbfState.haveDop = false;
 	sbfState.haveVelCov = false;
+	sbfState.haveChannelStatus = false;
 	memset(&sbfState.pvt, 0, sizeof(sbfState.pvt));
 	memset(&sbfState.dop, 0, sizeof(sbfState.dop));
 	memset(&sbfState.velCov, 0, sizeof(sbfState.velCov));
+	memset(sbfState.channelStatusPayload, 0, sizeof(sbfState.channelStatusPayload));
 }
 
 void gpsSeptentrioReset(void)
@@ -259,7 +219,7 @@ static bool sbfCommitEpoch(void)
 	gpsSetFixState(hasFix); 
 
 	// Verify commited data (debugging only)
-	fprintf(stderr, "[GPS] Commit successful!\n");
+	fprintf(stderr, "[GPS] Commit successful\n");
 	fprintf(stderr, "[GPS] Lat: %d, Lon: %d, Alt: %d cm, NumSat: %d, GroundSpeed: %d cm/s, GroundCourse: %d deg*10\n", gpsSol.llh.lat, gpsSol.llh.lon, gpsSol.llh.altCm, gpsSol.numSat, gpsSol.groundSpeed, gpsSol.groundCourse); // debugging only
 	fprintf(stderr, "[GPS] VelN: %d cm/s, VelE: %d cm/s, VelD: %d cm/s\n", gpsSol.velned.velN, gpsSol.velned.velE, gpsSol.velned.velD); // debugging only
 	fprintf(stderr, "[GPS] AccH: %d mm, AccV: %d mm, AccS: %d mm\n", gpsSol.acc.hAcc, gpsSol.acc.vAcc, gpsSol.acc.sAcc); // debugging only
@@ -267,6 +227,76 @@ static bool sbfCommitEpoch(void)
 	fprintf(stderr, "[GPS] DOP: PDOP=%d, HDOP=%d, VDOP=%d\n", gpsSol.dop.pdop, gpsSol.dop.hdop, gpsSol.dop.vdop); // debugging only
 
 	return true;
+}
+
+static void sbfProcessChannelStatus(void) {
+    const sbfChannelStatusHeader_t *header = (const sbfChannelStatusHeader_t *)sbfState.channelStatusPayload;
+
+    uint8_t *sat = sbfState.channelStatusPayload + sizeof(*header); // pointer to the first ChannelSatInfo sub-block
+
+    GPS_numCh = header->n;
+	fprintf(stderr, "[GPS] Header: n=%d (MAX=%d), sb1_length=%d, sb2_length=%d\n\n", header->n, GPS_SV_MAXSATS, header->sb1_length, header->sb2_length); // debugging only
+
+	unsigned svCount = 0; // count of valid satellites processed
+
+    for (unsigned i = 0; i < GPS_numCh; i++) { // loop over the number of satellites reported by the receiver 
+		sbfChannelSatInfo_t s1;
+		memcpy(&s1, sat, sizeof(s1));
+
+		// Resolve SVID
+		const uint16_t svid = (s1.svid != 0) ? s1.svid : s1.svid_full;
+		const uint8_t gnssId = sbfSvidToGnssId(svid);
+
+		// Walk N2 ChannelStateInfo sub-blocks to find main antenna tracking status
+        uint8_t track = 0; 
+        uint8_t quality = 0;
+        const uint8_t *state = sat + header->sb1_length;
+
+		for (uint8_t j = 0; j < s1.n2; j++) {
+            sbfChannelStateInfo_t s2;
+            memcpy(&s2, state, sizeof(s2));
+            if (s2.antenna == 0) { // main antenna only for the quality assessment 
+                track = s2.tracking_status & 0x3;  
+                if      (track == 1) quality |= 1; // search 
+                else if (track == 2) quality |= 2; // sync
+                else if (track == 3) quality |= 5; // tracking = code+carrier locked
+
+                if ((s2.pvt_status & 0x3) == 2) quality |= (1 << 3); // used in PVT
+                break;
+            }
+            state += header->sb2_length; // advance to the next ChannelStateInfo sub-block
+        }
+
+		if (gnssId == 255 || track == 0) { // unknown constellation or idle/not applicable antenna tracking status
+            sat += header->sb1_length + s1.n2 * header->sb2_length; // skip to the next ChannelSatInfo sub-block
+            continue; 
+        }
+
+		if (svCount < GPS_SV_MAXSATS) { // only process up to the maximum number of satellites we can store
+            GPS_svinfo[svCount].chn = gnssId;
+            GPS_svinfo[svCount].svid = sbfSvidToSatId(svid);
+            GPS_svinfo[svCount].cno  = 0; // not provided in ChannelStatus
+
+            // Health status mapping
+            uint8_t health = s1.health_status & 0x3;
+            if      (health == 1) quality |= (1 << 4); // healthy
+            else if (health == 3) quality |= (2 << 4); // unhealthy 
+            GPS_svinfo[svCount].quality = quality;
+
+            svCount++;
+        }
+
+        sat += header->sb1_length + s1.n2 * header->sb2_length; // advance to the next ChannelSatInfo sub-block
+	}
+
+	GPS_numCh = svCount; // assign final active satellite count 
+
+	// Fill the rest of the array with the standard sentinel values (as UBLOX does)
+	for (unsigned i = svCount; i < GPS_SV_MAXSATS; i++) {
+        GPS_svinfo[i] = (GPS_svinfo_t){ .chn = 255 };
+    }
+
+	fprintf(stderr, "[GPS] Registered %d satellites\n", GPS_numCh); // debugging only
 }
 
 static void sbfProcessBlock(void)
@@ -308,6 +338,17 @@ static void sbfProcessBlock(void)
 
 	case SBF_BLOCK_ENDOFPVT:
 		fprintf(stderr, "[GPS] Processing End of PVT block\n"); // debugging only
+		// Epoch commit handled in gpsNewFrameSeptentrio() 
+		break;
+
+	case SBF_BLOCK_CHANNELSTATUS:
+		if (payloadLength >= sizeof(sbfChannelStatusHeader_t)) {
+			fprintf(stderr, "[GPS] Processing Channel Status block\n"); // debugging only
+			memcpy(sbfState.channelStatusPayload, payload, MIN(payloadLength, SBF_MAX_FRAME_SIZE - SBF_HEADER_SIZE));
+    	    sbfState.channelStatusPayloadLength = payloadLength; // store the actual payload length for processing
+			sbfState.haveChannelStatus = true;
+			sbfProcessChannelStatus();
+		}
 		break;
 
 	default:
@@ -318,72 +359,69 @@ static void sbfProcessBlock(void)
 
 bool gpsNewFrameSeptentrio(uint8_t data)
 {	
-	if (!sbfState.synced) {
+	if (!sbfState.synced) { // we are not yet synced, check for the sync sequence
 		if (sbfState.index == 0) {
-			if (data != SBF_SYNC1) {
-				fprintf(stderr, "[GPS] Not Synced 1\n"); // debugging only
-				return false;
-			}
-			fprintf(stderr, "[GPS] Synced 1\n"); // debugging only
-			sbfState.frame[sbfState.index++] = data; // copy the first sync byte into the frame buffer (and increment the index) 
-			// However, as the sync is always the same, do we really need to store it in the frame buffer? 
-			// (to be discussed)
+			if (data != SBF_SYNC1) return false;
+			
+			sbfState.frame[sbfState.index++] = data; // copy the first sync byte into the frame buffer 
 			return false; // wait for the second sync byte
 		}
 
 		if (sbfState.index == 1) { // we have received the first sync byte, now check for the second
 			if (data != SBF_SYNC2) {
-				fprintf(stderr, "[GPS] Not Synced 2\n"); // debugging only
 				sbfResetFrame();
 				return false;
 			}
-			fprintf(stderr, "[GPS] Synced 2\n"); // debugging only
+			fprintf(stderr, "[GPS] Synced\n"); // debugging only
 			sbfState.frame[sbfState.index++] = data; 
-			sbfState.synced = true; // valid sync sequence received, we are now synced
+			sbfState.synced = true;     // valid sync sequence received, we are now synced
+			sbfState.calculatedCrc = 0; // initialize the accumulated CRC for the frame (excluding the sync bytes)
 			return false; // wait for the rest of the frame
 		}
 	}
 
-	if (sbfState.index >= SBF_MAX_FRAME_SIZE) {
-		fprintf(stderr, "[GPS] Frame size exceeded maximum allowed size\n"); // debugging only
-		sbfResetFrame();
-		return false;
+	if (sbfState.index >= 4) { // CRC accumulation starts after sync and CRC fields (first 4 bytes of the frame)
+		sbfState.calculatedCrc = sbfAccumulateCrc16(sbfState.calculatedCrc, data);
 	}
 
-	sbfState.frame[sbfState.index++] = data; // once synced, bytes are accumulated into the frame buffer until the expected length is reached
+	if (sbfState.index < SBF_MAX_FRAME_SIZE) { // only store bytes in the frame buffer if we haven't exceeded the defined maximum size
+		sbfState.frame[sbfState.index] = data;
+	} 
+	sbfState.index++; // keep updating the index to count up to the true frame length 
 
-	if (sbfState.index == SBF_HEADER_SIZE) { // full header needed to determine the expected length of the frame
+	if (sbfState.index == SBF_HEADER_SIZE) { // get packet length from the header 
 		memcpy(&sbfState.header, sbfState.frame, sizeof(sbfHeader_t));
 		sbfState.expectedLength = sbfState.header.length;
+		fprintf(stderr, "[GPS] Expected frame length: %d (max: %d)\n", sbfState.expectedLength, SBF_MAX_FRAME_SIZE); // debugging only
 
-		if (sbfState.expectedLength < SBF_HEADER_SIZE || sbfState.expectedLength > SBF_MAX_FRAME_SIZE) {
+		if (sbfState.expectedLength < SBF_HEADER_SIZE || sbfState.expectedLength > SBF_MAX_FRAME_SANITY_SIZE) {
 			fprintf(stderr, "[GPS] Invalid frame length: %d\n", sbfState.expectedLength); // debugging only
 			sbfResetFrame();
 			return false;
 		}
 	}
 
+	// Once we have received the expected length of the frame, we can process it
 	if (sbfState.expectedLength != 0 && sbfState.index >= sbfState.expectedLength) {
 		memcpy(&sbfState.header, sbfState.frame, sizeof(sbfHeader_t));
-		// Validate the CRC of the received frame
-		if (sbfCrc16(&sbfState.frame[4], (uint16_t)(sbfState.expectedLength - 4)) == sbfState.header.crc) {
+		
+		if (sbfState.calculatedCrc == sbfState.header.crc) { // accumulated CRC matches the expected CRC in the header
 			const uint16_t blockId = sbfBlockId(&sbfState.header);
-			sbfProcessBlock();
-			if (blockId == SBF_BLOCK_ENDOFPVT) { // the end of a PVT epoch has been reached, commit the epoch and reset for the next one
-				fprintf(stderr, "[GPS] End of PVT block received, committing epoch\n"); // debugging only
+			sbfProcessBlock(); // only the bytes up to MAX_FRAME_SIZE are processed, any excess bytes are not included in the frame buffer and are ignored
+			
+			// Detect boundary block to commit the epoch
+			if (blockId == SBF_BLOCK_ENDOFPVT) { 
 				const bool updated = sbfCommitEpoch();
 				sbfResetEpoch();
 				sbfResetFrame();
 				return updated;
-			} else {
-				fprintf(stderr, "[GPS] Not end of PVT block\n"); // debugging only
-			}
+			} 
 		} else {
-			fprintf(stderr, "[GPS] CRC mismatch: expected %04X, calculated %04X\n", sbfState.header.crc, sbfCrc16(&sbfState.frame[4], (uint16_t)(sbfState.expectedLength - 4))); // debugging only
+			fprintf(stderr, "[GPS] CRC mismatch! Expected: %04X, progressively calculated: %04X\n", sbfState.header.crc, sbfState.calculatedCrc);
+			// Skip until the next sync sequence is detected, reset the frame state
 		}
 		sbfResetFrame(); 
 	}
-
 	return false;
 }
 

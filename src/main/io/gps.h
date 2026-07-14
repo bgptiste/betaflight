@@ -247,7 +247,7 @@ typedef struct gpsAccuracy_s {
     uint32_t headAcc;               // heading accuracy in degrees * 1e-5
 } gpsAccuracy_t;
 
-/* Only available on U-blox protocol */
+/* Only available on U-blox and Septentrio protocols */
 typedef struct gpsVelned_s {
     int16_t velN; // north velocity, cm/s
     int16_t velE; // east velocity, cm/s
@@ -340,6 +340,7 @@ extern gpsSolutionData_t gpsSol;
 
 #define GPS_SV_MAXSATS_LEGACY   16U
 #define GPS_SV_MAXSATS_M8N      32U                     // must be larger than MAXSATS_LEGACY
+#define GPS_SV_MAXSATS          50U                     // maximum number of satellite channels supported by the GPS_svinfo array
 
 extern uint8_t GPS_update;                              // toggles on GPS nav position update (directly or via MSP)
 
@@ -349,7 +350,7 @@ typedef struct GPS_svinfo_s {
     uint8_t chn;      // When NumCh is 16 or less: Channel number
                       // When NumCh is more than 16: GNSS Id
                       //   0 = GPS, 1 = SBAS, 2 = Galileo, 3 = BeiDou
-                      //   4 = IMES, 5 = QZSS, 6 = Glonass
+                      //   4 = IMES, 5 = QZSS, 6 = Glonass, 7 = NavIC 
     uint8_t svid;     // Satellite ID
     uint8_t quality;  // When NumCh is 16 or less: Bitfield Qualtity
                       // When NumCh is more than 16: flags
@@ -372,7 +373,7 @@ typedef struct GPS_svinfo_s {
                       //     1 = carrier smoothed pseudorange used
     uint8_t cno;      // Carrier to Noise Ratio (Signal Strength)
 } GPS_svinfo_t;
-extern GPS_svinfo_t GPS_svinfo[GPS_SV_MAXSATS_M8N];
+extern GPS_svinfo_t GPS_svinfo[GPS_SV_MAXSATS];
 
 #define TASK_GPS_RATE       100     // default update rate of GPS task
 #define TASK_GPS_RATE_FAST  500    // update rate of GPS task while Rx buffer is not empty

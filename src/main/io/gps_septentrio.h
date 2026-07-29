@@ -23,6 +23,9 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+// Default COM port used
+extern const char septentrioDefaultPort[];
+
 // Septentrio Binary Format (SBF) parser constants
 #define	SBF_SYNC1                    '$' // 0x24
 #define	SBF_SYNC2                    '@' // 0x40
@@ -180,6 +183,14 @@ typedef struct {
 	uint8_t channelStatusPayload[SBF_MAX_FRAME_SIZE - SBF_HEADER_SIZE];
 	uint16_t channelStatusPayloadLength; 
 } sbfParserState_t; // SBF parser state 
+
+typedef enum {
+    SEPTENTRIO_CFG_FORCE_INPUT = 0,
+    SEPTENTRIO_CFG_SET_DATAIO,
+    SEPTENTRIO_CFG_SET_SBF_OUTPUT,
+    SEPTENTRIO_CFG_SET_DYNAMICS,
+    SEPTENTRIO_CFG_COMPLETE,
+} septentrioConfigStep_e;
 
 bool gpsNewFrameSeptentrio(uint8_t byte);
 void gpsSeptentrioReset(void);

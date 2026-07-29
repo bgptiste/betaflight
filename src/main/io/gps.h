@@ -25,6 +25,7 @@
 
 #include "common/axis.h"
 #include "common/time.h"
+#include "common/printf.h"
 #include <common/vector.h>
 
 #include "io/serial.h"
@@ -211,11 +212,11 @@ typedef enum {
 } gpsAutoBaud_e;
 
 typedef enum {
-    UBLOX_ACK_IDLE = 0,
-    UBLOX_ACK_WAITING,
-    UBLOX_ACK_GOT_ACK,
-    UBLOX_ACK_GOT_NACK
-} ubloxAckState_e;
+    GPS_ACK_IDLE = 0,
+    GPS_ACK_WAITING,
+    GPS_ACK_GOT_ACK,
+    GPS_ACK_GOT_NACK
+} gpsAckState_e;
 
 typedef struct gpsCoordinateDDDMMmmmm_s {
     int16_t dddmm;
@@ -312,7 +313,7 @@ typedef struct gpsData_s {
     uint8_t tempBaudRateIndex;      // index into auto-detecting or current baudrate
 
     uint8_t ackWaitingMsgId;        // Message id when waiting for ACK
-    ubloxAckState_e ackState;       // Ack State
+    gpsAckState_e ackState;         // Ack State
     uint8_t updateRateHz;
     bool ubloxM7orAbove;
     bool ubloxM8orAbove;

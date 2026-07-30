@@ -31,8 +31,7 @@
 #include "io/gps_septentrio.h"
 
 static sbfParserState_t sbfState;
-
-const char septentrioDefaultPort[] = "COM2";
+septentrioPortDetector_t portDetector;
 
 static uint16_t sbfBlockId(const sbfHeader_t *header)
 {
@@ -134,6 +133,14 @@ void gpsSeptentrioReset(void)
 	memset(&sbfState, 0, sizeof(sbfState));
 	sbfResetFrame();
 	sbfResetEpoch();
+}
+
+void gpsSeptentrioPortDetectorReset(void)
+{
+    memset(portDetector.rxBuf, 0, sizeof(portDetector.rxBuf));
+    portDetector.rxIdx = 0;
+    portDetector.isDetected = false;
+    portDetector.portName[0] = '\0'; // strictly empty port name (no fallback) 
 }
 
 static void sbfStartEpochIfNeeded(uint32_t tow)
@@ -341,7 +348,7 @@ static void sbfProcessBlock(void)
 
 	case SBF_BLOCK_ENDOFPVT:
 		// fprintf(stderr, "[GPS] Processing End of PVT block\n"); // debugging only
-		// Epoch commit handled in gpsNewFrameSeptentrio() 
+		// Epoch commit handled in gpsNewFrameSeptentrio(uint8_t) 
 		break;
 
 	case SBF_BLOCK_CHANNELSTATUS:
@@ -360,7 +367,7 @@ static void sbfProcessBlock(void)
 	}
 }
 
-static void sbfProcessAck(uint8_t data)
+static void gpsSeptentrioProcessAck(uint8_t data)
 {
     static uint8_t ackBuf[4]; // buffer to hold the last 4 bytes of the ACK/NACK response
     static uint8_t ackIdx = 0;
@@ -383,13 +390,67 @@ static void sbfProcessAck(uint8_t data)
     }
 }
 
-bool gpsNewFrameSeptentrio(uint8_t data)
-{	
-	if (gpsData.state == GPS_STATE_CONFIGURE && gpsData.ackState == GPS_ACK_WAITING) {
-        sbfProcessAck(data); // process ACK/NACK responses for configuration commands
+bool gpsSeptentrioProcessPort(uint8_t data)
+{
+	if (portDetector.isDetected) { // port already detected, no further processing needed
+		return true; 
+	}
+	if (data == 0 || data == '\r') { 
         return false;
     }
 
+	// Append byte to sliding buffer
+	if (portDetector.rxIdx < SEPTENTRIO_RX_BUF_SIZE - 1) { // ensure space for null terminator
+        portDetector.rxBuf[portDetector.rxIdx++] = (char)data;
+        portDetector.rxBuf[portDetector.rxIdx] = '\0'; // null-terminate the string 
+    } else { // sliding buffer is full, shift left and append new byte
+        memmove(portDetector.rxBuf, portDetector.rxBuf + 1, SEPTENTRIO_RX_BUF_SIZE - 2); 
+        portDetector.rxBuf[SEPTENTRIO_RX_BUF_SIZE - 2] = (char)data;
+        portDetector.rxBuf[SEPTENTRIO_RX_BUF_SIZE - 1] = '\0';
+    }
+
+	// Match serial and USB port names directly preceding the '>' prompt character
+	char *promptPtr = strchr(portDetector.rxBuf, '>');
+	if (promptPtr != NULL) {
+		// Reverse-search from '>' back to the start of rxBuf to find "COM" or "USB"
+        // Future-proofs against the 1-digit port limit of 4-character matching (promptPtr - 4)
+        // (e.g., "COM10" or "USB10" will be detected correctly)
+		char *searchPtr = promptPtr - 1;
+		while (searchPtr >= portDetector.rxBuf) {
+            // Check if searchPtr currently points to the start of "COM" or "USB"
+            if (strncmp(searchPtr, "COM", 3) == 0 || strncmp(searchPtr, "USB", 3) == 0) {
+                size_t nameLen = promptPtr - searchPtr; // length of the port string 
+
+                // Ensure the parsed name fits inside the destination buffer
+                if (nameLen < SEPTENTRIO_PORT_NAME_LENGTH) {
+                    strncpy(portDetector.portName, searchPtr, nameLen);
+                    portDetector.portName[nameLen] = '\0'; // properly null-terminate
+                    portDetector.isDetected = true;
+                    return true;
+                }
+            }
+            searchPtr--;
+        }
+	}
+	return false; // continue accumulating bytes until a valid port name is detected 
+}
+
+bool gpsNewFrameSeptentrio(uint8_t data)
+{	
+	// Non-SBF data processing (port detection and ACK handling)
+	if (gpsData.state == GPS_STATE_CONFIGURE && gpsData.state_position == SEPTENTRIO_CFG_DETECT_PORT) { 
+		if (gpsSeptentrioProcessPort(data)) { 
+			portDetector.isDetected = true;
+			gpsData.ackState = GPS_ACK_GOT_ACK; // port detected, move to next configuration step
+		}
+		return false; // continue processing until the port is detected and configuration can proceed
+	}
+	if (gpsData.state == GPS_STATE_CONFIGURE && gpsData.ackState == GPS_ACK_WAITING) {
+        gpsSeptentrioProcessAck(data); // process ACK/NACK responses for configuration commands
+        return false;
+    }
+
+	// SBF frame processing
 	if (!sbfState.synced) { // we are not yet synced, check for the sync sequence
 		if (sbfState.index == 0) {
 			if (data != SBF_SYNC1) return false;

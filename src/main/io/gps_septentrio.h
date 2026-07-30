@@ -23,8 +23,9 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-// Default COM port used
-extern const char septentrioDefaultPort[];
+#define SEPTENTRIO_PORT_NAME_LENGTH  6   // Maximum length of the serial port name including the null terminator
+#define SEPTENTRIO_RX_BUF_SIZE       128 // Size of the receive buffer for detecting the Septentrio port response
+#define SEPTENTRIO_CMD_BUF_SIZE      128 // Size of the command buffer for sending configurations to the Septentrio receiver  
 
 // Septentrio Binary Format (SBF) parser constants
 #define	SBF_SYNC1                    '$' // 0x24
@@ -184,13 +185,27 @@ typedef struct {
 	uint16_t channelStatusPayloadLength; 
 } sbfParserState_t; // SBF parser state 
 
+typedef struct septentrioPortDetector_s {
+    char rxBuf[SEPTENTRIO_RX_BUF_SIZE];
+    uint8_t rxIdx;
+    bool isDetected;
+    char portName[SEPTENTRIO_PORT_NAME_LENGTH]; // e.g., "COM1\0", "USB1\0"
+} septentrioPortDetector_t;
+
+extern septentrioPortDetector_t portDetector;
+
 typedef enum {
     SEPTENTRIO_CFG_FORCE_INPUT = 0,
+	SEPTENTRIO_CFG_DETECT_PORT,
     SEPTENTRIO_CFG_SET_DATAIO,
-    SEPTENTRIO_CFG_SET_SBF_OUTPUT,
+    SEPTENTRIO_CFG_SET_SBF_OUTPUT_PVT,
+	SEPTENTRIO_CFG_SET_SBF_OUTPUT_CHANNELSTATUS,
     SEPTENTRIO_CFG_SET_DYNAMICS,
     SEPTENTRIO_CFG_COMPLETE,
 } septentrioConfigStep_e;
 
-bool gpsNewFrameSeptentrio(uint8_t byte);
+bool gpsNewFrameSeptentrio(uint8_t data);
 void gpsSeptentrioReset(void);
+// Detect the active receiver port 
+void gpsSeptentrioPortDetectorReset(void);
+bool gpsSeptentrioProcessPort(uint8_t data);

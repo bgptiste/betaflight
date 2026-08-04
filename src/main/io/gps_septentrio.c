@@ -228,12 +228,8 @@ static bool sbfCommitEpoch(void)
 	gpsSetFixState(hasFix); 
 
 	// Verify commited data (debugging only)
-	// fprintf(stderr, "[GPS] Commit successful\n");
+	// fprintf(stderr, "[GPS] Commit successful\n"); // debugging only
 	// fprintf(stderr, "[GPS] Lat: %d, Lon: %d, Alt: %d cm, NumSat: %d, GroundSpeed: %d cm/s, GroundCourse: %d deg*10\n", gpsSol.llh.lat, gpsSol.llh.lon, gpsSol.llh.altCm, gpsSol.numSat, gpsSol.groundSpeed, gpsSol.groundCourse); // debugging only
-	// fprintf(stderr, "[GPS] VelN: %d cm/s, VelE: %d cm/s, VelD: %d cm/s\n", gpsSol.velned.velN, gpsSol.velned.velE, gpsSol.velned.velD); // debugging only
-	// fprintf(stderr, "[GPS] AccH: %d mm, AccV: %d mm, AccS: %d mm\n", gpsSol.acc.hAcc, gpsSol.acc.vAcc, gpsSol.acc.sAcc); // debugging only
-	// fprintf(stderr, "[GPS] Nav Interval: %d ms, Fix State: %s\n", gpsSol.navIntervalMs, hasFix ? "FIX" : "NO FIX"); // debugging only
-	// fprintf(stderr, "[GPS] DOP: PDOP=%d, HDOP=%d, VDOP=%d\n", gpsSol.dop.pdop, gpsSol.dop.hdop, gpsSol.dop.vdop); // debugging only
 
 	return true;
 }
@@ -243,9 +239,7 @@ static void sbfProcessChannelStatus(void) {
 
     uint8_t *sat = sbfState.channelStatusPayload + sizeof(*header); // pointer to the first ChannelSatInfo sub-block
 
-    GPS_numCh = header->n;
-	// fprintf(stderr, "[GPS] Header: n=%d (MAX=%d), sb1_length=%d, sb2_length=%d\n\n", header->n, GPS_SV_MAXSATS, header->sb1_length, header->sb2_length); // debugging only
-
+    GPS_numCh = header->n; // number of ChannelSatInfo sub-blocks in this ChannelStatus block
 	unsigned svCount = 0; // count of valid satellites processed
 
     for (unsigned i = 0; i < GPS_numCh; i++) { // loop over the number of satellites reported by the receiver 
@@ -264,12 +258,13 @@ static void sbfProcessChannelStatus(void) {
 		for (uint8_t j = 0; j < s1.n2; j++) {
             sbfChannelStateInfo_t s2;
             memcpy(&s2, state, sizeof(s2));
+
             if (s2.antenna == 0) { // main antenna only for the quality assessment 
 				// Extract the lower 2 bits for the tracking status
-                track = s2.tracking_status & 0x3; 
+                track = s2.tracking_status & 0x3;  // 0 for idle or not applicable
                 if      (track == 1) quality |= 1; // search 
                 else if (track == 2) quality |= 2; // sync
-                else if (track == 3) quality |= 5; // tracking = code+carrier locked
+                else if (track == 3) quality |= 5; // tracking 
 
                 if ((s2.pvt_status & 0x3) == 2) quality |= (1 << 3); // used in PVT
                 break;
@@ -285,17 +280,16 @@ static void sbfProcessChannelStatus(void) {
 		if (svCount < GPS_SV_MAXSATS) { // only process up to the maximum number of satellites we can store
             GPS_svinfo[svCount].chn = gnssId;
             GPS_svinfo[svCount].svid = sbfSvidToSatId(svid);
-            GPS_svinfo[svCount].cno  = 0; // not provided in ChannelStatus
+            GPS_svinfo[svCount].cno = 0; // not provided in ChannelStatus
 
             // Extract the health status from the lower 2 bits of the health_status field
-            uint8_t health = s1.health_status & 0x3;
+            uint8_t health = s1.health_status & 0x3;   // 0 for unknown
             if      (health == 1) quality |= (1 << 4); // healthy
-            else if (health == 3) quality |= (2 << 4); // unhealthy 
-            GPS_svinfo[svCount].quality = quality;
+            else if (health == 3) quality |= (2 << 4); // unhealthy
+            GPS_svinfo[svCount].quality = quality; 
 
             svCount++;
         }
-
         sat += header->sb1_length + s1.n2 * header->sb2_length; // advance to the next ChannelSatInfo sub-block
 	}
 

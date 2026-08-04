@@ -1033,6 +1033,13 @@ static void septentrioSendOutputCommand(const char *streamName, const char *sbfB
     septentrioSendCommand(cmd);
 }
 
+static const char *septentrioUpdateRateToString(uint8_t updateRateHz)
+{
+    return (updateRateHz >= 10) ? "msec100" :
+           (updateRateHz >= 5)  ? "msec200" :
+           (updateRateHz >= 2)  ? "msec500" : "sec1"; // default to 1Hz
+}
+
 static void gpsConfigureSeptentrio(void)
 {    
     // Wait until GPS transmit buffer is empty
@@ -1077,6 +1084,9 @@ static void gpsConfigureSeptentrio(void)
             }
             lastStatePositionTime = gpsData.now;
 
+            // User-configured update rate 
+            const char *septentrioUserRate = septentrioUpdateRateToString(gpsConfig()->gps_update_rate_hz);
+
             // Configuration steps for Septentrio receivers
             switch ((septentrioConfigStep_e)gpsData.state_position) {
             case SEPTENTRIO_CFG_FORCE_INPUT:
@@ -1086,44 +1096,36 @@ static void gpsConfigureSeptentrio(void)
                 gpsData.ackState = GPS_ACK_GOT_ACK;
                 gpsData.lastMessageSent = gpsData.now;
                 break;
-
             case SEPTENTRIO_CFG_DETECT_PORT:
                 // Detect the active receiver port for SBF output
                 // No ACK expected directly, but waiting for the receiver's ping response to detect the port (dedicated timeout handling)
                 gpsSeptentrioPortDetectorReset();
                 septentrioSendCommand("gecm\n"); // ping command (getEchoMessage)
                 break;
-
             case SEPTENTRIO_CFG_SET_DATAIO:
                 char cmd[SEPTENTRIO_CMD_BUF_SIZE];
                 tfp_sprintf(cmd,"sdio,%s,Auto,SBF\n", portDetector.portName); 
                 septentrioSendCommand(cmd);
                 break;
-
             case SEPTENTRIO_CFG_SET_SBF_OUTPUT_PVT:
                 // Main navigation blocks at the user-configured update rate
-                const char *pvtRate = 
-                    (gpsConfig()->gps_update_rate_hz >= 10) ? "msec100" :
-                    (gpsConfig()->gps_update_rate_hz >= 5)  ? "msec200" :
-                    (gpsConfig()->gps_update_rate_hz >= 2)  ? "msec500" : "sec1"; // default to 1Hz
-
-                septentrioSendOutputCommand("Stream1", "PVTGeodetic+DOP+EndOfPVT", pvtRate); // without VelCovGeodetic for now 
+                septentrioSendOutputCommand("Stream1", "PVTGeodetic+DOP+EndOfPVT", septentrioUserRate);
                 break;
-
+            case SEPTENTRIO_CFG_SET_SBF_OUTPUT_COV:
+                // Symmetric variance-covariance matrices for velocity
+                septentrioSendOutputCommand("Stream1", "+VelCovGeodetic", septentrioUserRate);
+                break;
             case SEPTENTRIO_CFG_SET_SBF_OUTPUT_CHANNELSTATUS:
                 // 1Hz is sufficient for tracking receiver channels and populating satellite (SV) information
                 septentrioSendOutputCommand("Stream2", "ChannelStatus", "sec1");
                 break;
-
             case SEPTENTRIO_CFG_SET_DYNAMICS:
                 septentrioSendCommand("srd,high,UAV\n");
                 break;
-
             case SEPTENTRIO_CFG_COMPLETE:
                 gpsSeptentrioReset();
                 gpsSetState(GPS_STATE_RECEIVING_DATA);
                 break;
-
             default:
                 break;
             }

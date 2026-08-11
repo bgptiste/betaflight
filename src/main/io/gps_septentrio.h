@@ -44,9 +44,9 @@
 // the maximum number of supported satellites is set to 50. 
 // The frame buffer is therefore sized for a 50-satellite ChannelStatus block with two antennas per channel.
 // The GPS_svinfo array has been updated accordingly, 
-// and the Configurator now displays up to 50 satellites in the GPS tab.
+// and the Betaflight App now displays up to 50 satellites in the GPS tab.
 // In some cases, more than 50 satellites are tracked. 
-// To stay within this limit, only satellites contributing to the current GPS solution are retained, 
+// To stay within this limit, only satellites tracked by the current GPS solution are retained,
 // while channels with an idle or not applicable tracking status are ignored.
 #define SBF_MAX_FRAME_SIZE           (SBF_HEADER_SIZE + 6 + (12 + (8 * SBF_MAX_ANTENNAS_PER_CHANNEL)) * GPS_SV_MAXSATS) 
 
@@ -71,30 +71,34 @@
 #define SEPTENTRIO_GNSS_NAVIC   7
 #define SEPTENTRIO_GNSS_UNKNOWN 255
 
+// Satellite ID sentinel value for unknown or unused slots
 #define SEPTENTRIO_SATID_UNKNOWN 0
 
+// SBF frame header structure
 typedef struct __attribute__((packed)) {
 	uint8_t sync1;
 	uint8_t sync2;
 	uint16_t crc;
-	uint16_t id_word; // 13 bits of block ID, 3 bits of version
+	uint16_t id;  // 13 bits of block ID, 3 bits of version
 	uint16_t length;
 	// Receiver time stamp
 	uint32_t tow; // Time of Week (ms)
 	uint16_t wnc; // Week Number Count (mod 1024)
 } sbfHeader_t;
 
+// SBF block for DOP (Dilution of Precision) values
 typedef struct __attribute__((packed)) {
-	uint8_t nr_sv;
+	uint8_t nrSv;
 	uint8_t reserved;
-	uint16_t p_dop;
-	uint16_t t_dop;
-	uint16_t h_dop;
-	uint16_t v_dop;
+	uint16_t pDop;
+	uint16_t tDop;
+	uint16_t hDop;
+	uint16_t vDop;
 	float hpl;
 	float vpl;
 } sbfDop_t;
 
+// SBF block for PVT (Position, Velocity, Time) in geodetic coordinates
 typedef struct __attribute__((packed)) {
 	uint8_t mode; 
 	uint8_t error;
@@ -106,66 +110,71 @@ typedef struct __attribute__((packed)) {
 	float ve;
 	float vu;
 	float cog;
-	double rx_clk_bias;
-	float rx_clk_drift;
-	uint8_t time_system;
+	double rxClkBias;
+	float rxClkDrift;
+	uint8_t timeSystem;
 	uint8_t datum;
-	uint8_t nr_sv;
-	uint8_t wa_corr_info;
-	uint16_t reference_id;
-	uint16_t mean_corr_age;
-	uint32_t signal_info;
-	uint8_t alert_flag;
-	uint8_t nr_bases;
-	uint16_t ppp_info;
+	uint8_t nrSv;
+	uint8_t waCorrInfo;
+	uint16_t referenceID;
+	uint16_t meanCorrAge;
+	uint32_t signalInfo;
+	uint8_t alertFlag;
+	uint8_t nrBases;
+	uint16_t pppInfo;
 	uint16_t latency;
-	uint16_t h_accuracy;
-	uint16_t v_accuracy;
+	uint16_t hAccuracy;
+	uint16_t vAccuracy;
 } sbfPvtGeodetic_t;
 
+// SBF block for velocity covariance in geodetic coordinates
 typedef struct __attribute__((packed)) {
 	uint8_t mode;
 	uint8_t error;
-	float cov_vn_vn;
-	float cov_ve_ve;
-	float cov_vu_vu;
-	float cov_dt_dt;
-	float cov_vn_ve;
-	float cov_vn_vu;
-	float cov_vn_dt;
-	float cov_ve_vu;
-	float cov_ve_dt;
-	float cov_vu_dt;
+	float covVnVn;
+	float covVeVe;
+	float covVuVu;
+	float covDtDt;
+	float covVnVe;
+	float covVnVu;
+	float covVnDt;
+	float covVeVu;
+	float covVeDt;
+	float covVuDt;
 } sbfVelCovGeodetic_t;
 
-// Space Vehicle (Satellite) Information
+// Space Vehicle (satellite) information
+// SBF block header for ChannelStatus, followed by ChannelSatInfo and ChannelStateInfo sub-blocks
 typedef struct __attribute__((packed)) {
-    uint8_t n;              // number of ChannelSatInfo sub-blocks
-    uint8_t sb1_length;     // ChannelSatInfo size (excluding nested StateInfo)
-    uint8_t sb2_length;     // ChannelStateInfo size
+    uint8_t n;         // number of ChannelSatInfo sub-blocks
+    uint8_t sb1Length; // ChannelSatInfo size (excluding nested StateInfo)
+    uint8_t sb2Length; // ChannelStateInfo size
     uint8_t reserved[3];
 } sbfChannelStatusHeader_t;
 
+// SBF sub-block for satellite information
 typedef struct __attribute__((packed)) {
-    uint8_t svid;             // 0 = use svidFull instead
-    uint8_t freq_nr;          // GLONASS only
-    uint16_t svid_full;       // used when svid == 0
-    uint16_t azimuth_riseset; // bits 0-8: azimuth, bits 14-15: rise/set
-    uint16_t health_status;   // 2-bit health status per signal: 0=health unknown or not applicable, 1=healthy, 3=unhealthy
-    int8_t elevation;         // degrees, -90 to 90
-    uint8_t n2;               // number of ChannelStateInfo sub-blocks following
-    uint8_t rx_channel;
+    uint8_t svID;            // 0 = use svidFull instead
+    uint8_t freqNr;          // GLONASS only
+    uint16_t svidFull;       // used when svid == 0
+    uint16_t azimuthRiseset; // bits 0-8: azimuth, bits 14-15: rise/set
+    uint16_t healthStatus;   // 2-bit health status per signal: 0=health unknown or not applicable, 1=healthy, 3=unhealthy
+    int8_t elevation;        // degrees, -90 to 90
+    uint8_t n2;              // number of ChannelStateInfo sub-blocks following
+    uint8_t rxChannel;
     uint8_t reserved2;
 } sbfChannelSatInfo_t;
 
+// SBF sub-block for satellite tracking and PVT usage information for a specific antenna
 typedef struct __attribute__((packed)) {
-    uint8_t antenna;          // 0 = main antenna
+    uint8_t antenna;         // 0 = main antenna
     uint8_t reserved;
-    uint16_t tracking_status; // 2-bit fields per signal: 0=idle or not applicable, 1=search, 2=sync, 3=tracking
-    uint16_t pvt_status;      // 2-bit fields per signal: 0=not used, 1=wait eph, 2=used, 3=rejected
-    uint16_t pvt_info;        // internal, ignore
+    uint16_t trackingStatus; // 2-bit fields per signal: 0=idle or not applicable, 1=search, 2=sync, 3=tracking
+    uint16_t pvtStatus;      // 2-bit fields per signal: 0=not used, 1=wait eph, 2=used, 3=rejected
+    uint16_t pvtInfo;        // internal, ignore
 } sbfChannelStateInfo_t;
 
+// SBF parser state structure
 typedef struct {
 	uint8_t frame[SBF_MAX_FRAME_SIZE];
 	uint16_t index;          // current index into frame buffer
@@ -187,8 +196,9 @@ typedef struct {
 	sbfVelCovGeodetic_t velCov;
 	uint8_t channelStatusPayload[SBF_MAX_FRAME_SIZE - SBF_HEADER_SIZE];
 	uint16_t channelStatusPayloadLength; 
-} sbfParserState_t; // SBF parser state 
+} sbfParserState_t;
 
+// Port detection state structure
 typedef struct septentrioPortDetector_s {
     char rxBuf[SEPTENTRIO_RX_BUF_SIZE];
     uint8_t rxIdx;
@@ -198,6 +208,7 @@ typedef struct septentrioPortDetector_s {
 
 extern septentrioPortDetector_t portDetector;
 
+// Configuration steps for the Septentrio receiver
 typedef enum {
     SEPTENTRIO_CFG_FORCE_INPUT = 0,
 	SEPTENTRIO_CFG_DETECT_PORT,
@@ -211,6 +222,7 @@ typedef enum {
 
 bool gpsNewFrameSeptentrio(uint8_t data);
 void gpsSeptentrioReset(void);
+
 // Detect the active receiver port 
 void gpsSeptentrioPortDetectorReset(void);
 bool gpsSeptentrioProcessPort(uint8_t data);

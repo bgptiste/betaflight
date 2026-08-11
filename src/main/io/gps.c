@@ -394,6 +394,7 @@ static bool gpsNewFrameNMEA(char c);
 #ifdef USE_GPS_UBLOX
 static bool gpsNewFrameUBLOX(uint8_t data);
 #endif
+// (Septentrio declarations in gps_septentrio.h)
 
 static void gpsSetState(gpsState_e state)
 {

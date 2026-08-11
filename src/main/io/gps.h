@@ -240,7 +240,7 @@ typedef struct gpsDilution_s {
     uint16_t vdop;                  // vertical DOP   - 1D (* 100)
 } gpsDilution_t;
 
-/* Only available on U-blox protocol */
+/* Only available on U-blox and Septentrio protocols */
 typedef struct gpsAccuracy_s {
     uint32_t hAcc;                  // horizontal accuracy in mm
     uint32_t vAcc;                  // vertical accuracy in mm

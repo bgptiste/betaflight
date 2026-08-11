@@ -38,8 +38,7 @@ static uint16_t sbfBlockId(const sbfHeader_t *header)
 	return (uint16_t)(header->id_word & 0x1FFF);
 }
 
-// Before: CRC calculation was performed over the entire frame once the expected length was reached.
-// Now: CRC calculation is performed incrementally as each byte is received,
+// CRC calculation is performed incrementally as each byte is received,
 // allowing early detection of corrupted frames and avoiding the need to store the entire frame before validation.
 
 // This also allows handling frames exceeding SBF_MAX_FRAME_SIZE. Until this limit is reached
@@ -49,20 +48,6 @@ static uint16_t sbfBlockId(const sbfHeader_t *header)
 
 // Without this change, handling frames larger than SBF_MAX_FRAME_SIZE would require skipping
 // CRC validation to store the truncated payload, which could lead to accepting corrupted frames.
-
-// static uint16_t sbfCrc16(const uint8_t *data, uint16_t length)
-// {
-// 	uint8_t x;
-// 	uint16_t crc = 0;
-// 	// Calculate CRC16 over the data, starting after the sync bytes 
-// 	while (length--) {
-// 		x = (uint8_t)((crc >> 8) ^ *data++);
-// 		x ^= x >> 4;
-// 		crc = (uint16_t)((crc << 8) ^ ((uint16_t)x << 12) ^ ((uint16_t)x << 5) ^ x);
-// 	}
-// 	return crc;
-// }
-
 static uint16_t sbfAccumulateCrc16(uint16_t crc, uint8_t data)
 {
     uint8_t x = (uint8_t)((crc >> 8) ^ data);
@@ -91,9 +76,10 @@ static uint8_t sbfSvidToGnssId(uint16_t svid) {
 static uint8_t sbfSvidToSatId(uint16_t svid) {
     if (svid >= 1   && svid <= 37)  return svid;       // GPS G01-G37
     if (svid >= 38  && svid <= 61)  return svid - 37;  // GLONASS R01-R24
-    if (svid == 62)                 return 0;          // GLONASS unknown slot
+    if (svid == 62)                 return SEPTENTRIO_SATID_UNKNOWN; // GLONASS unknown slot
     if (svid >= 63  && svid <= 68)  return svid - 38;  // GLONASS R25-R30
     if (svid >= 71  && svid <= 106) return svid - 70;  // Galileo E01-E36
+	// 107-119: L-Band MSS, no standard satellite ID, skip
     if (svid >= 120 && svid <= 140) return svid - 100; // SBAS S20-S40
     if (svid >= 141 && svid <= 180) return svid - 140; // BeiDou C01-C40
     if (svid >= 181 && svid <= 190) return svid - 180; // QZSS J01-J10
@@ -102,7 +88,15 @@ static uint8_t sbfSvidToSatId(uint16_t svid) {
     if (svid >= 216 && svid <= 222) return svid - 208; // NavIC I08-I14
     if (svid >= 223 && svid <= 245) return svid - 182; // BeiDou C41-C63
     if (svid >= 250 && svid <= 251) return svid - 212; // GPS G38-G39
-    return (uint8_t)svid;
+    return SEPTENTRIO_SATID_UNKNOWN;
+}
+
+void gpsSeptentrioPortDetectorReset(void)
+{
+    memset(portDetector.rxBuf, 0, sizeof(portDetector.rxBuf));
+    portDetector.rxIdx = 0;
+    portDetector.isDetected = false;
+    portDetector.portName[0] = '\0'; // strictly empty port name (no fallback) 
 }
 
 static void sbfResetFrame(void)
@@ -114,48 +108,45 @@ static void sbfResetFrame(void)
 	memset(sbfState.frame, 0, sizeof(sbfState.frame));
 }
 
-static void sbfResetEpoch(void)
+static void sbfResetNavEpoch(void)
 {
-	sbfState.currentTow = 0;
-	sbfState.currentWnc = 0;
+	sbfState.currentNavTow = 0;
+	sbfState.currentNavWnc = 0;
 	sbfState.havePvt = false;
 	sbfState.haveDop = false;
 	sbfState.haveVelCov = false;
-	sbfState.haveChannelStatus = false;
 	memset(&sbfState.pvt, 0, sizeof(sbfState.pvt));
 	memset(&sbfState.dop, 0, sizeof(sbfState.dop));
 	memset(&sbfState.velCov, 0, sizeof(sbfState.velCov));
+}
+
+static void sbfResetChannelStatus(void)
+{
+	sbfState.haveChannelStatus = false;
 	memset(sbfState.channelStatusPayload, 0, sizeof(sbfState.channelStatusPayload));
+	sbfState.channelStatusPayloadLength = 0;
 }
 
 void gpsSeptentrioReset(void)
 {
 	memset(&sbfState, 0, sizeof(sbfState));
 	sbfResetFrame();
-	sbfResetEpoch();
+	sbfResetNavEpoch();
+	sbfResetChannelStatus();
 }
 
-void gpsSeptentrioPortDetectorReset(void)
-{
-    memset(portDetector.rxBuf, 0, sizeof(portDetector.rxBuf));
-    portDetector.rxIdx = 0;
-    portDetector.isDetected = false;
-    portDetector.portName[0] = '\0'; // strictly empty port name (no fallback) 
-}
-
-static void sbfStartEpochIfNeeded(uint32_t tow)
+static void sbfStartNavEpochIfNeeded(uint32_t tow)
 {
 	// If we have a new TOW, reset the epoch state to start accumulating new data for this epoch
-	if (sbfState.currentTow != 0 && tow != sbfState.currentTow) {
-		// fprintf(stderr, "[GPS] TOW Mismatch! Old: %u, New: %u\n", sbfState.currentTow, tow); // debugging only
+	if (sbfState.currentNavTow != 0 && tow != sbfState.currentNavTow) {
 		sbfState.havePvt = false;
 		sbfState.haveDop = false;
 		sbfState.haveVelCov = false;
 	}
-	sbfState.currentTow = tow;
+	sbfState.currentNavTow = tow;
 }
 
-static bool sbfCommitEpoch(void)
+static bool sbfCommitNavEpoch(void)
 {
 	// Commit the current epoch data to gpsSol if we have a complete PVT epoch
 	// fprintf(stderr, "[GPS] Commit attempt (flags: PVT=%d, DOP=%d, VelCov=%d)\n", sbfState.havePvt, sbfState.haveDop, sbfState.haveVelCov); // debugging only
@@ -168,7 +159,7 @@ static bool sbfCommitEpoch(void)
 	const sbfPvtGeodetic_t *pvt = &sbfState.pvt;
 	const uint8_t modeType = (uint8_t)(pvt->mode & 0x0F); // 0: no GNSS PVT available, 1: stand-alone PVT, 2: differential PVT, 3: fixed solution...
 
-	gpsSol.time = sbfState.currentTow;
+	gpsSol.time = sbfState.currentNavTow;
 	gpsSol.llh.lat = (int32_t)lround(RADIANS_TO_DEGREES((float)pvt->latitude) * GPS_DEGREES_DIVIDER); // multiply by GPS_DEGREES_DIVIDER to convert from degrees to the internal representation
 	gpsSol.llh.lon = (int32_t)lround(RADIANS_TO_DEGREES((float)pvt->longitude) * GPS_DEGREES_DIVIDER);
 	gpsSol.llh.altCm = (int32_t)lround((pvt->height - (double)pvt->undulation) * 100.0); // subtract the geoid undulation to get height above mean sea level
@@ -180,18 +171,19 @@ static bool sbfCommitEpoch(void)
 		gpsSol.dop.vdop = sbfState.dop.v_dop;
 	}
 
-	gpsSol.groundSpeed = (uint16_t)lround(sqrt(sq(pvt->vn) + sq(pvt->ve)) * 100.0); 
-	gpsSol.speed3d = (uint16_t)lround(sqrt(sq(pvt->vn) + sq(pvt->ve) + sq(pvt->vu)) * 100.0); 
+	gpsSol.groundSpeed = (uint16_t)lround(sqrt(sq(pvt->vn) + sq(pvt->ve)) * 100.0); // ground speed in cm/s, calculated from the north and east velocity components
+	gpsSol.speed3d = (uint16_t)lround(sqrt(sq(pvt->vn) + sq(pvt->ve) + sq(pvt->vu)) * 100.0); // 3D speed in cm/s, calculated from the north, east, and up velocity components
 
-	// Normalize course over ground to be within [0, 360) degrees
-	if (isnan(pvt->cog) || isinf(pvt->cog) || pvt->cog < -1e9f) { // invalid course value, set to 0
-		gpsSol.groundCourse = 0;
+	// Normalize course-over-ground to be within [0, 360) degrees
+	if (isnan(pvt->cog) || isinf(pvt->cog) || pvt->cog < -1e9f) { // invalid course value, set to UINT16_MAX as a sentinel (0 being a valid angle)
+		// Septentrio marks course-over-ground as invalid when the speed is lower than 0.1 m/s
+		gpsSol.groundCourse = UINT16_MAX; 
 	} else {
 		float courseDeg = fmodf(pvt->cog, 360.0f); 
 		if (courseDeg < 0.0f) { // ensure course is non-negative
 			courseDeg += 360.0f;
 		}
-		gpsSol.groundCourse = (uint16_t)lroundf(courseDeg * 10.0f); // convert to degrees * 10 for internal representation
+		gpsSol.groundCourse = (uint16_t)lroundf(courseDeg * 10.0f); // convert to degrees * 10 
 	}
 
 	gpsSol.velned.velN = (int16_t)lroundf(pvt->vn * 100.0f); 
@@ -200,7 +192,7 @@ static bool sbfCommitEpoch(void)
 
 	gpsSol.acc.hAcc = (uint32_t)pvt->h_accuracy * 5U;  
 	gpsSol.acc.vAcc = (uint32_t)pvt->v_accuracy * 5U;
-	gpsSol.acc.sAcc = 0;
+	gpsSol.acc.sAcc = UINT32_MAX; 
 	if (sbfState.haveVelCov) {
 		// SBF does not provide a direct speed accuracy value, but it can be estimated from the velocity covariance matrix
 		// The diagonal elements of the covariance matrix represent the variance of the respective velocity components (vn, ve, vu)
@@ -210,18 +202,18 @@ static bool sbfCommitEpoch(void)
 			gpsSol.acc.sAcc = (uint32_t)lroundf(sqrtf(maxVariance) * 1000.0f); // the square root of the variance gives the standard deviation (accuracy)
 		}
 	}
-	gpsSol.acc.headAcc = 0; // not provided by SBF with this set of blocks (to be continued)
+	gpsSol.acc.headAcc = UINT32_MAX; // not provided by SBF with this set of blocks (as only course over ground is available)
 	
 	// Calculate the navigation interval based on the current and last epoch timestamps
 	const uint64_t weekDurationMs = 7ULL * 24ULL * 3600ULL * 1000ULL;
-	const uint64_t currentEpochMs = ((uint64_t)sbfState.currentWnc * weekDurationMs) + sbfState.currentTow;
+	const uint64_t currentNavEpochMs = ((uint64_t)sbfState.currentNavWnc * weekDurationMs) + sbfState.currentNavTow;
 	if (sbfState.lastNavEpochMs == 0U) { 
 		gpsSol.navIntervalMs = 100; // default to 100 ms for the first epoch
 	} else {
-		const uint64_t navDeltaMs = currentEpochMs - sbfState.lastNavEpochMs; 
-		gpsSol.navIntervalMs = (uint32_t)constrain((uint32_t)navDeltaMs, 50, 2500); // see calculateNavInterval() function 
+		const uint64_t navDeltaMs = currentNavEpochMs - sbfState.lastNavEpochMs; 
+		gpsSol.navIntervalMs = (uint32_t)constrain((uint32_t)navDeltaMs, 50, 2500); // see calculateNavInterval() function (gps.c)
 	}
-	sbfState.lastNavEpochMs = currentEpochMs;
+	sbfState.lastNavEpochMs = currentNavEpochMs;
 
 	bool hasFix = (modeType != 0U && pvt->error == 0U); // true if a valid GNSS fix is available
 
@@ -310,13 +302,10 @@ static void sbfProcessBlock(void)
 	const uint8_t *payload = &sbfState.frame[SBF_HEADER_SIZE];
 	const uint16_t payloadLength = (uint16_t)(sbfState.expectedLength - SBF_HEADER_SIZE);
 
-	if (blockId != SBF_BLOCK_ENDOFPVT) {
-        sbfStartEpochIfNeeded(header->tow); 
-        sbfState.currentWnc = header->wnc;
-    }
-
 	switch (blockId) {
 	case SBF_BLOCK_PVTGEODETIC:
+		sbfStartNavEpochIfNeeded(header->tow); 
+        sbfState.currentNavWnc = header->wnc;
 		if (payloadLength >= sizeof(sbfPvtGeodetic_t)) {
 			// fprintf(stderr, "[GPS] Processing PVT Geodetic block\n"); // debugging only
 			memcpy(&sbfState.pvt, payload, sizeof(sbfPvtGeodetic_t));
@@ -325,6 +314,8 @@ static void sbfProcessBlock(void)
 		break;
 
 	case SBF_BLOCK_DOP:
+		sbfStartNavEpochIfNeeded(header->tow); 
+        sbfState.currentNavWnc = header->wnc;
 		if (payloadLength >= sizeof(sbfDop_t)) {
 			// fprintf(stderr, "[GPS] Processing DOP block\n"); // debugging only
 			memcpy(&sbfState.dop, payload, sizeof(sbfDop_t));
@@ -333,6 +324,8 @@ static void sbfProcessBlock(void)
 		break;
 
 	case SBF_BLOCK_VELCOVGEODETIC:
+		sbfStartNavEpochIfNeeded(header->tow); 
+        sbfState.currentNavWnc = header->wnc;
 		if (payloadLength >= sizeof(sbfVelCovGeodetic_t)) {
 			// fprintf(stderr, "[GPS] Processing Velocity Covariance Geodetic block\n"); // debugging only
 			memcpy(&sbfState.velCov, payload, sizeof(sbfVelCovGeodetic_t));
@@ -363,24 +356,26 @@ static void sbfProcessBlock(void)
 
 static void gpsSeptentrioProcessAck(uint8_t data)
 {
-    static uint8_t ackBuf[4]; // buffer to hold the last 4 bytes of the ACK/NACK response
+    static uint8_t ackBuf[4]; // circular buffer to hold the last 4 bytes of the ACK/NACK response
     static uint8_t ackIdx = 0;
 
     ackBuf[ackIdx & 0x3] = data; // & 0x3 equivalent to modulo 4, keeps the index within the bounds of the buffer
     ackIdx++;
 
 	// The reply to a valid command is the command itself, preceded by "$R: "
-	// Otherwise, the reply is "$?: " for an invalid command
-    if (data == '\n' && ackIdx >= 3) { // check for the end of the response line and ensure we have at least 3 bytes to check
-        const uint8_t prev2 = ackBuf[(ackIdx - 3) & 0x3]; 
-        const uint8_t prev1 = ackBuf[(ackIdx - 2) & 0x3];
-        if (prev2 == '$' && prev1 == 'R') {
+	// The reply to an invalid command starts with "$R? "
+    if (ackIdx >= 3) { 
+        const uint8_t prev2 = ackBuf[(ackIdx - 3) & 0x3]; // 2 bytes ago 
+        const uint8_t prev1 = ackBuf[(ackIdx - 2) & 0x3]; // 1 byte ago
+		const uint8_t prev0 = ackBuf[(ackIdx - 1) & 0x3]; // current byte
+
+        if (prev2 == '$' && prev1 == 'R' && prev0 == ':') {
             gpsData.ackState = GPS_ACK_GOT_ACK; 
             ackIdx = 0;
-        } else if (prev2 == '$' && prev1 == '?') { 
+        } else if (prev2 == '$' && prev1 == 'R' && prev0 == '?') { 
             gpsData.ackState = GPS_ACK_GOT_NACK;
             ackIdx = 0;
-        }
+        } // otherwise, continue scanning for the ACK/NACK sequence in the incoming data stream
     }
 }
 
@@ -497,13 +492,13 @@ bool gpsNewFrameSeptentrio(uint8_t data)
 			
 			// Detect boundary block to commit the epoch
 			if (blockId == SBF_BLOCK_ENDOFPVT) { 
-				const bool updated = sbfCommitEpoch();
-				sbfResetEpoch();
+				const bool updated = sbfCommitNavEpoch();
+				sbfResetNavEpoch();
 				sbfResetFrame();
 				return updated;
-			} 
+			}
 		} else {
-			// fprintf(stderr, "[GPS] CRC mismatch! Expected: %04X, progressively calculated: %04X\n", sbfState.header.crc, sbfState.calculatedCrc);
+			// fprintf(stderr, "[GPS] CRC mismatch! Expected: %04X, progressively calculated: %04X\n", sbfState.header.crc, sbfState.calculatedCrc); // debugging only
 			// Skip until the next sync sequence is detected, reset the frame state
 		}
 		sbfResetFrame(); 

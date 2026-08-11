@@ -22,7 +22,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
-// #include <stdio.h> // debugging only
 
 #include "platform.h"
 
@@ -95,9 +94,8 @@ GPS_svinfo_t GPS_svinfo[GPS_SV_MAXSATS];
 #define GPS_TIMEOUT_MS 2500
 // Timeout for waiting for an ACK or NAK response to a configuration command
 #define UBLOX_ACK_TIMEOUT_MS 150
-
-#define SEPTENTRIO_ACK_TIMEOUT_MS 150 // TO BE CONFIRMED
-#define SEPTENTRIO_PORT_DETECTION_TIMEOUT_MS 1500 // TO BE CONFIRMED
+#define SEPTENTRIO_ACK_TIMEOUT_MS 200      
+#define SEPTENTRIO_PORT_DETECTION_TIMEOUT_MS 1500 // Time to wait for a response from the Septentrio receiver when probing for the active port
 
 // Time allowed for module to respond to baud rate change during initial configuration
 #define GPS_CONFIG_BAUD_CHANGE_INTERVAL 330  // Time to wait, in ms, between 'test this baud rate' messages
@@ -105,9 +103,7 @@ GPS_svinfo_t GPS_svinfo[GPS_SV_MAXSATS];
 #define GPS_BAUDRATE_TEST_COUNT 3       // Number of times to repeat the test message when setting baudrate
 #define GPS_RECV_TIME_MAX 25            // Max permitted time, in us, for the NMEA Receive Data process
 #define GPS_UBLOX_RECV_TIME_MAX 15      // Max permitted time, in us, for the UBLOX Receive Data process
-
-#define GPS_SEPTENTRIO_RECV_TIME_MAX 15 // TO BE DETERMINED 
-
+#define GPS_SEPTENTRIO_RECV_TIME_MAX 15 // Max permitted time, in us, for the SEPTENTRIO Receive Data process
 #define GPS_FRAME_PROCESS_TIME_US 10    // Estimated ceiling for time required to process a frame, in us, for the Receive Data process
 // Decay the estimated max task duration by 1/(1 << GPS_TASK_DECAY_SHIFT) on every invocation
 #define GPS_TASK_DECAY_SHIFT 9         // Smoothing factor for GPS task re-scheduler
@@ -411,8 +407,6 @@ static void gpsSetState(gpsState_e state)
 
 void gpsInit(void)
 {
-    // fprintf(stderr, "[GPS] GPS init\n"); // debugging only
-
     gpsDataIntervalSeconds = 0.1f;
     gpsData.userBaudRateIndex = 0;
     gpsData.timeouts = 0;
@@ -428,12 +422,8 @@ void gpsInit(void)
     memset(dashboardGpsPacketLog, 0x00, sizeof(dashboardGpsPacketLog));
 #endif
 
-    // fprintf(stderr, "[GPS] GPS unknown state\n"); // debugging only
-
     // init gpsData structure. if we're not actually enabled, don't bother doing anything else
     gpsSetState(GPS_STATE_UNKNOWN);
-
-    // fprintf(stderr, "[GPS] GPS provider: %d\n", gpsConfig()->provider); // debugging only
 
     // MSP / virtual / DroneCAN providers don't own a serial port — the
     // frame source is another subsystem feeding gpsSol through updateXxxGPS().
@@ -1029,6 +1019,7 @@ static void septentrioSendCommand(const char *command)
 static void septentrioSendOutputCommand(const char *streamName, const char *sbfBlocks, const char *rate)
 {
     char cmd[SEPTENTRIO_CMD_BUF_SIZE];
+    // sso: setSBFOutput
     tfp_sprintf(cmd, "sso, %s, %s, %s, %s\n", streamName, portDetector.portName, sbfBlocks, rate);
     septentrioSendCommand(cmd);
 }
@@ -1084,8 +1075,9 @@ static void gpsConfigureSeptentrio(void)
             }
             lastStatePositionTime = gpsData.now;
 
-            // User-configured update rate 
-            const char *septentrioUserRate = septentrioUpdateRateToString(gpsConfig()->gps_update_rate_hz);
+            // Set the navigation solution rate to the user-configured update rate
+            gpsData.updateRateHz = gpsConfig()->gps_update_rate_hz;
+            const char *septentrioUserRate = septentrioUpdateRateToString(gpsData.updateRateHz);
 
             // Configuration steps for Septentrio receivers
             switch ((septentrioConfigStep_e)gpsData.state_position) {
@@ -1100,10 +1092,12 @@ static void gpsConfigureSeptentrio(void)
                 // Detect the active receiver port for SBF output
                 // No ACK expected directly, but waiting for the receiver's ping response to detect the port (dedicated timeout handling)
                 gpsSeptentrioPortDetectorReset();
-                septentrioSendCommand("gecm\n"); // ping command (getEchoMessage)
+                // gecm: getEchoMessage (ping command)
+                septentrioSendCommand("gecm\n"); 
                 break;
             case SEPTENTRIO_CFG_SET_DATAIO:
                 char cmd[SEPTENTRIO_CMD_BUF_SIZE];
+                // sdio: setDataInOut
                 tfp_sprintf(cmd,"sdio,%s,Auto,SBF\n", portDetector.portName); 
                 septentrioSendCommand(cmd);
                 break;
@@ -1120,6 +1114,7 @@ static void gpsConfigureSeptentrio(void)
                 septentrioSendOutputCommand("Stream2", "ChannelStatus", "sec1");
                 break;
             case SEPTENTRIO_CFG_SET_DYNAMICS:
+                // srd: setReceiverDynamics
                 septentrioSendCommand("srd,high,UAV\n");
                 break;
             case SEPTENTRIO_CFG_COMPLETE:
@@ -1129,8 +1124,7 @@ static void gpsConfigureSeptentrio(void)
             default:
                 break;
             }
-        } 
-        // ACK or NACK are then triggered in the gpsNewFrameSeptentrio(uint8_t) function, which processes incoming data  
+        } // ACK or NACK are then triggered in the gpsNewFrameSeptentrio(uint8_t) function, which processes incoming data 
         
         // ACK handling for Septentrio receivers (same states as ublox)
         switch (gpsData.ackState) {
@@ -1159,7 +1153,16 @@ static void gpsConfigureSeptentrio(void)
             gpsData.ackState = GPS_ACK_IDLE; 
             break;
         case GPS_ACK_GOT_NACK:
-            gpsData.state_position++; // ignore NACK for now and advance to the next configuration command
+            // Port detection and position output commands are essential,
+            // so restart the configuration from the appropriate step (force input or detect port)
+            if ((septentrioConfigStep_e)gpsData.state_position == SEPTENTRIO_CFG_DETECT_PORT) {
+                gpsData.state_position = SEPTENTRIO_CFG_FORCE_INPUT;
+            } else if (((septentrioConfigStep_e)gpsData.state_position == SEPTENTRIO_CFG_SET_DATAIO)
+                    || ((septentrioConfigStep_e)gpsData.state_position == SEPTENTRIO_CFG_SET_SBF_OUTPUT_PVT)) {
+                gpsData.state_position = SEPTENTRIO_CFG_DETECT_PORT;
+            } else { // for other commands, ignore the NACK and proceed to the next configuration step
+                gpsData.state_position++; 
+            }
             gpsData.state_ts = gpsData.now;
             gpsData.ackState = GPS_ACK_IDLE;
             break;
@@ -1684,7 +1687,6 @@ void gpsUpdate(timeUs_t currentTimeUs)
                 break;
             }
             if (gpsNewFrameSeptentrio(serialRead(gpsPort))) {
-                // fprintf(stderr, "[GPS] New Septentrio frame complete!\n\n"); // debugging only
                 gpsHandleFrameComplete();
             }
         }
@@ -1764,7 +1766,6 @@ void gpsUpdate(timeUs_t currentTimeUs)
         // check for no data/gps timeout/cable disconnection etc
         if (cmp32(gpsData.now, gpsData.lastNavMessage) > GPS_TIMEOUT_MS) {
             gpsSetState(GPS_STATE_LOST_COMMUNICATION);
-            // fprintf(stderr, "[GPS] No data\n"); // debugging only
         }
         break;
     }

@@ -45,7 +45,7 @@
 // The frame buffer is therefore sized for a 50-satellite ChannelStatus block with two antennas per channel.
 // The GPS_svinfo array has been updated accordingly, 
 // and the Configurator now displays up to 50 satellites in the GPS tab.
-// In many cases, more than 50 satellites are tracked. 
+// In some cases, more than 50 satellites are tracked. 
 // To stay within this limit, only satellites contributing to the current GPS solution are retained, 
 // while channels with an idle or not applicable tracking status are ignored.
 #define SBF_MAX_FRAME_SIZE           (SBF_HEADER_SIZE + 6 + (12 + (8 * SBF_MAX_ANTENNAS_PER_CHANNEL)) * GPS_SV_MAXSATS) 
@@ -61,7 +61,7 @@
 #define SBF_BLOCK_ENDOFPVT       5921
 #define SBF_BLOCK_CHANNELSTATUS  4013
 
-// GNSS Constellation IDs (IMES not provided in SBF)
+// GNSS Constellation IDs
 #define SEPTENTRIO_GNSS_GPS     0
 #define SEPTENTRIO_GNSS_SBAS    1
 #define SEPTENTRIO_GNSS_GALILEO 2
@@ -70,6 +70,8 @@
 #define SEPTENTRIO_GNSS_GLONASS 6
 #define SEPTENTRIO_GNSS_NAVIC   7
 #define SEPTENTRIO_GNSS_UNKNOWN 255
+
+#define SEPTENTRIO_SATID_UNKNOWN 0
 
 typedef struct __attribute__((packed)) {
 	uint8_t sync1;
@@ -138,27 +140,27 @@ typedef struct __attribute__((packed)) {
 
 // Space Vehicle (Satellite) Information
 typedef struct __attribute__((packed)) {
-    uint8_t  n;               // number of ChannelSatInfo sub-blocks
-    uint8_t  sb1_length;      // ChannelSatInfo size (excluding nested StateInfo)
-    uint8_t  sb2_length;      // ChannelStateInfo size
-    uint8_t  reserved[3];
+    uint8_t n;              // number of ChannelSatInfo sub-blocks
+    uint8_t sb1_length;     // ChannelSatInfo size (excluding nested StateInfo)
+    uint8_t sb2_length;     // ChannelStateInfo size
+    uint8_t reserved[3];
 } sbfChannelStatusHeader_t;
 
 typedef struct __attribute__((packed)) {
-    uint8_t  svid;            // 0 = use svidFull instead
-    uint8_t  freq_nr;         // GLONASS only
+    uint8_t svid;             // 0 = use svidFull instead
+    uint8_t freq_nr;          // GLONASS only
     uint16_t svid_full;       // used when svid == 0
     uint16_t azimuth_riseset; // bits 0-8: azimuth, bits 14-15: rise/set
     uint16_t health_status;   // 2-bit health status per signal: 0=health unknown or not applicable, 1=healthy, 3=unhealthy
-    int8_t   elevation;       // degrees, -90 to 90
-    uint8_t  n2;              // number of ChannelStateInfo sub-blocks following
-    uint8_t  rx_channel;
-    uint8_t  reserved2;
+    int8_t elevation;         // degrees, -90 to 90
+    uint8_t n2;               // number of ChannelStateInfo sub-blocks following
+    uint8_t rx_channel;
+    uint8_t reserved2;
 } sbfChannelSatInfo_t;
 
 typedef struct __attribute__((packed)) {
-    uint8_t  antenna;         // 0 = main antenna
-    uint8_t  reserved;
+    uint8_t antenna;          // 0 = main antenna
+    uint8_t reserved;
     uint16_t tracking_status; // 2-bit fields per signal: 0=idle or not applicable, 1=search, 2=sync, 3=tracking
     uint16_t pvt_status;      // 2-bit fields per signal: 0=not used, 1=wait eph, 2=used, 3=rejected
     uint16_t pvt_info;        // internal, ignore
@@ -169,9 +171,11 @@ typedef struct {
 	uint16_t index;          // current index into frame buffer
 	uint16_t expectedLength;
 	uint16_t calculatedCrc;  // accumulated CRC of the received frame  
-	uint32_t currentTow;
-	uint16_t currentWnc;
-	uint64_t lastNavEpochMs; // timestamp of the last committed epoch in milliseconds since GPS epoch
+	// Navigation epoch data
+	uint32_t currentNavTow;
+	uint16_t currentNavWnc;
+	uint64_t lastNavEpochMs; // timestamp of the last committed navigation epoch in milliseconds since GPS epoch
+	// Flags and block data
 	bool synced; 			 // true when the sync sequence has been detected and we are accumulating bytes into the frame buffer
 	bool havePvt;
 	bool haveDop;
